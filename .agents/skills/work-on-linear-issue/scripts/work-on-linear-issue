@@ -1,0 +1,224 @@
+#!/bin/bash
+
+# Check if issue argument is provided
+if [ $# -eq 0 ]; then
+	echo "Usage: work-on-issue <issue-abbreviation>"
+	echo "Examples:"
+	echo "  work-on-issue AB-123"
+	echo "  work-on-issue https://linear.app/abc/issue/AB-123/issue-title"
+	exit 2
+fi
+
+ISSUE_ARG="$1"
+TEAM_ID="MC" # Default team ID, can be modified
+
+# Find root directory (where .agents directory is located)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+
+# Try to load .env file from root directory
+if [ -f "$ROOT_DIR/.env" ]; then
+	set -a
+	source "$ROOT_DIR/.env"
+	set +a
+fi
+
+# Extract issue abbreviation if URL is provided
+if [[ "$ISSUE_ARG" == *"linear.app"* ]]; then
+	ISSUE_ABBREV=$(echo "$ISSUE_ARG" | grep -oE '[A-Z]+-[0-9]+')
+else
+	ISSUE_ABBREV="$ISSUE_ARG"
+fi
+
+# Validate issue format
+if [[ ! "$ISSUE_ABBREV" =~ ^[A-Z]+-[0-9]+$ ]]; then
+	echo "Error: Invalid issue format. Expected format: TEAM-123"
+	exit 1
+fi
+
+# Check if LINEAR_API_KEY is set
+if [ -z "$LINEAR_API_KEY" ]; then
+	echo "Error: LINEAR_API_KEY environment variable not set"
+	echo "Please set your Linear API key: export LINEAR_API_KEY=your_token_here"
+	exit 1
+fi
+
+# GraphQL query for Linear issue - search by identifier (shorthand)
+read -r -d '' QUERY <<'EOF'
+query($number: Float!) {
+  issues(filter: { number: { eq: $number } }) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      priority
+      state {
+        name
+        type
+      }
+      assignee {
+        name
+        email
+      }
+      creator {
+        name
+        email
+      }
+      team {
+        name
+        key
+      }
+      labels {
+        nodes {
+          name
+          color
+        }
+      }
+      project {
+        name
+      }
+      estimate
+      url
+      createdAt
+      updatedAt
+      comments {
+        nodes {
+          body
+          user {
+            name
+          }
+          createdAt
+        }
+      }
+    }
+  }
+}
+EOF
+
+# Extract just the number part from MC-91 format
+ISSUE_NUMBER=$(echo "$ISSUE_ABBREV" | grep -oE '[0-9]+$')
+
+# Execute query - escape the query properly
+JSON_PAYLOAD=$(jq -n --arg query "$QUERY" --argjson number "$ISSUE_NUMBER" \
+	'{query: $query, variables: {number: $number}}')
+
+RESPONSE=$(curl -s -X POST https://api.linear.app/graphql \
+	-H "Authorization: $LINEAR_API_KEY" \
+	-H "Content-Type: application/json" \
+	-d "$JSON_PAYLOAD")
+
+# Check if curl command was successful
+if [ $? -ne 0 ]; then
+	echo "Error: Could not fetch issue $ISSUE_ABBREV from Linear API"
+	exit 1
+fi
+
+# Check for API errors
+if echo "$RESPONSE" | jq -e '.errors' >/dev/null 2>&1; then
+	echo "Error: Linear API returned an error:"
+	echo "$RESPONSE" | jq -r '.errors[].message'
+	exit 1
+fi
+
+# Extract issue data
+ISSUE_DATA=$(echo "$RESPONSE" | jq -r '.data.issues.nodes[0]')
+if [ "$ISSUE_DATA" == "null" ]; then
+	echo "Error: Issue $ISSUE_ABBREV not found"
+	exit 1
+fi
+
+# Extract fields
+TITLE=$(echo "$ISSUE_DATA" | jq -r '.title')
+DESCRIPTION=$(echo "$ISSUE_DATA" | jq -r '.description // ""')
+IDENTIFIER=$(echo "$ISSUE_DATA" | jq -r '.identifier')
+PRIORITY=$(echo "$ISSUE_DATA" | jq -r '.priority // "None"')
+STATE=$(echo "$ISSUE_DATA" | jq -r '.state.name')
+ASSIGNEE=$(echo "$ISSUE_DATA" | jq -r '.assignee.name // "Unassigned"')
+CREATOR=$(echo "$ISSUE_DATA" | jq -r '.creator.name')
+TEAM=$(echo "$ISSUE_DATA" | jq -r '.team.name')
+URL=$(echo "$ISSUE_DATA" | jq -r '.url')
+ESTIMATE=$(echo "$ISSUE_DATA" | jq -r '.estimate // "Not estimated"')
+
+# Output formatted content
+cat <<EOF
+Deep-dive on this Linear issue, explore the codebase, and propose a comprehensive plan.
+
+# $TITLE ($IDENTIFIER)
+**Team:** $TEAM  
+**State:** $STATE  
+**Priority:** $PRIORITY  
+**Assignee:** $ASSIGNEE  
+**Creator:** $CREATOR  
+**Estimate:** $ESTIMATE  
+**URL:** $URL  
+
+## Description
+$DESCRIPTION
+
+EOF
+
+# Add labels if present
+LABELS=$(echo "$ISSUE_DATA" | jq -r '.labels.nodes[] | .name' | tr '\n' ', ' | sed 's/, $//')
+if [ -n "$LABELS" ]; then
+	echo "**Labels:** $LABELS"
+	echo
+fi
+
+# Add project if present
+PROJECT=$(echo "$ISSUE_DATA" | jq -r '.project.name // empty')
+if [ -n "$PROJECT" ]; then
+	echo "**Project:** $PROJECT"
+	echo
+fi
+
+# Add comments if present
+COMMENTS=$(echo "$ISSUE_DATA" | jq -r '.comments.nodes[] | "**@\(.user.name)** (\(.createdAt | split("T")[0])):\n\(.body)\n"')
+if [ -n "$COMMENTS" ]; then
+	echo "## Comments"
+	echo
+	echo "$COMMENTS"
+fi
+
+cat <<'EOF'
+
+
+“AI models are geniuses who start from scratch on every task.” — Noam Brown
+
+Onboard yourself to the current task:
+• Use ultrathink.
+• Explore the codebase.
+• Ask questions if needed.
+
+Goal: Be fully prepared to start working on the task.
+
+Take as long as you need to prepare. Over-preparation is better than under-preparation.
+
+## Your Tasks
+
+
+You are an experienced software developer tasked with addressing a Linear issue. Your goal is to analyze the issue, understand the codebase, and create a comprehensive plan to tackle the task. Follow these steps carefully:
+
+1. First, review the above issue.
+
+2. Next, examine the relevant parts of the codebase.
+
+Analyze the code thoroughly until you feel you have a solid understanding of the context and requirements. Analyze existing patterns in the codebase.
+Also look for smells and potential issues that may arise during the implementation and might bite us. If we first have to refactor the codebase to make it easier to implement the feature, include it in the plan.
+
+3. Create a comprehensive plan and todo list for addressing the issue. Consider the following aspects:
+   - Required code changes
+   - Potential impacts on other parts of the system
+   - Necessary tests to be written or updated
+   - Documentation updates
+   - Performance considerations
+   - Security implications
+   - Backwards compatibility (if applicable)
+   - Include the reference link to featurebase or any other link that has the source of the user request
+
+4. Think deeply about all aspects of the task. Consider edge cases, potential challenges, and best practices for addressing the issue.
+5. **ASK FOR EXPLICIT APPROVAL** before starting on the TODO list.
+
+Remember, your task is to create a plan, not to implement the changes. Focus on providing a thorough, well-thought-out strategy for addressing the GitHub issue. Then ASK FOR APPROVAL BEFORE YOU START WORKING on the TODO LIST.
+
+EOF
