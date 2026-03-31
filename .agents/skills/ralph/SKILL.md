@@ -7,6 +7,15 @@ description: "Autonomous feature development - setup and execution. Triggers on:
 
 Interactive feature planning that creates ralph-ready tasks with dependencies.
 
+Before using the task-store commands below, resolve the helper once:
+
+```bash
+RALPH_SKILL_URL="$(amp skill info ralph | sed -n 's/^Path: //p')"
+RALPH_SKILL_PATH_ENCODED="${RALPH_SKILL_URL#file://}"
+RALPH_SKILL_PATH="$(printf '%b' "${RALPH_SKILL_PATH_ENCODED//%/\\x}")"
+RALPH_TASKS="$RALPH_SKILL_PATH/scripts/ralph-tasks"
+```
+
 ---
 
 ## The Job
@@ -16,7 +25,7 @@ Interactive feature planning that creates ralph-ready tasks with dependencies.
 ### Mode 1: New Feature
 1. Chat through the feature - Ask clarifying questions
 2. Break into small tasks - Each completable in one iteration
-3. Create task_list tasks - Parent + subtasks with `dependsOn`
+3. Create tasks with `"$RALPH_TASKS"` - Parent + subtasks with `dependsOn`
 4. Set up ralph files - Save parent ID, reset progress.txt
 
 ### Mode 2: Existing Tasks
@@ -101,28 +110,31 @@ Parallel tasks that don't depend on each other can share the same dependency.
 ### First, create the parent task:
 
 ```
-task_list create
-  title: "[Feature Name]"
-  description: "[One-line description of the feature]"
-  repoURL: "https://github.com/snarktank/untangle"
+FEATURE_JSON=$("$RALPH_TASKS" init-feature --json \
+  --title "[Feature Name]" \
+  --description "[One-line description of the feature]")
+PARENT_TASK_ID=$(printf '%s\n' "$FEATURE_JSON" | grep -o '"id":"[^"]*"' | head -n1 | cut -d'"' -f4)
 ```
 
 **Save the returned task ID** - you'll need it for subtasks.
 
-### Then, create subtasks with parentID and dependsOn:
+### Then, create subtasks with `--feature` and `--depends-on`:
 
 ```
-task_list create
-  title: "[Task title - action-oriented]"
-  description: "[Detailed description with:
-    - What to implement
-    - Files to create/modify
-    - Acceptance criteria
-    - How to verify (typecheck, tests, browser)]"
-  parentID: "<parent-task-id>"
-  dependsOn: ["<previous-task-id>"]  // omit for first task
-  repoURL: "https://github.com/snarktank/untangle"
+cat <<'EOF' | "$RALPH_TASKS" add-task \
+  --feature "$PARENT_TASK_ID" \
+  --title "[Task title - action-oriented]" \
+  --description-file - \
+  --depends-on "<previous-task-id>"
+[Detailed description with:
+  - What to implement
+  - Files to create/modify
+  - Acceptance criteria
+  - How to verify (typecheck, tests, browser)]
+EOF
 ```
+
+Omit `--depends-on` for the first task. Repeat it for multiple dependencies.
 
 ### Task description format:
 
@@ -186,7 +198,7 @@ npx tsx scripts/ralph/ralph.ts [max_iterations]
 
 **To check status:**
 ```bash
-amp task list --parentID [parent-id] --limit 10
+"$RALPH_TASKS" status --feature [parent-id]
 ```
 
 ---
@@ -201,24 +213,20 @@ Ask the user:
 ```
 What's the parent task? You can give me:
 - The task ID directly
-- A search term and I'll find it
-- Or say "list recent" to see recent tasks
+- A search term and I'll inspect the recent feature list
+- Or say "list recent" to see recent parent tasks
 ```
 
-To search for tasks (always use limit to avoid context overflow):
+To list recent parent tasks:
 ```
-task_list list
-  repoURL: "https://github.com/snarktank/untangle"
-  limit: 10
+"$RALPH_TASKS" list-features
 ```
 
 ### Verify subtasks exist:
 
-Once you have the parent ID, check for subtasks (always use limit):
+Once you have the parent ID, check for subtasks:
 ```
-task_list list
-  parentID: "<parent-task-id>"
-  limit: 10
+"$RALPH_TASKS" list-tasks --feature "<parent-task-id>"
 ```
 
 If no subtasks found, the parent task might BE the work (not a container). Ask:
@@ -330,7 +338,7 @@ cat scripts/ralph/parent-task-id.txt
 head -10 scripts/ralph/progress.txt
 
 # List subtasks to confirm they exist
-# (use task_list list with parentID)
+"$RALPH_TASKS" list-tasks --feature "$(cat scripts/ralph/parent-task-id.txt)"
 ```
 
 **Only after completing all 4 steps is Ralph ready to run.**
@@ -436,7 +444,7 @@ When all subtasks are completed:
 2. Ralph outputs `<promise>COMPLETE</promise>`
 3. The ralph.sh/ralph.ts loop detects this and exits
 
-**Important:** Ralph uses `limit: 5` when querying tasks to avoid context overflow. If you have many subtasks, they'll be processed over multiple iterations.
+**Important:** Ralph uses `"$RALPH_TASKS" list-tasks --feature "$PARENT_TASK_ID" --ready --leaf-only` when querying tasks. If you have many subtasks, they'll be processed over multiple iterations.
 
 ---
 
@@ -488,35 +496,32 @@ This ensures each feature starts with a clean slate. Progress.txt is SHORT-TERM 
 
 ### 1. Check for ready tasks (with nested hierarchy support)
 
-The task hierarchy may have multiple levels (parent → container → leaf tasks). Use this approach to find all descendant tasks:
+The task hierarchy may have multiple levels (parent → container → leaf tasks). Use the task-store helper to query ready leaf tasks inside the current parent task.
 
-**Step 1: Get all tasks for the repo**
+**Step 1: Resolve the current parent task ID**
 ```
-task_list action: "list", repoURL: "<repo-url>", ready: true, status: "open", limit: 10
+PARENT_TASK_ID=$(cat scripts/ralph/parent-task-id.txt)
 ```
 
-**Important:** Always use `limit` (5-10) to avoid context overflow with many tasks.
+**Step 2: List ready leaf tasks**
+```
+"$RALPH_TASKS" list-tasks --feature "$PARENT_TASK_ID" --ready --leaf-only --json
+```
 
-**Step 2: Build the descendant set**
-Starting from the parent task ID, collect all tasks that are descendants:
-1. Find tasks where `parentID` equals the parent task ID (direct children)
-2. For each child found, recursively find their children
-3. Continue until no more descendants are found
+This returns the actual work items:
+- open tasks
+- all dependencies satisfied
+- leaf tasks only
 
-**Step 3: Filter to workable tasks**
-From the descendant set, select tasks that are:
-- `ready: true` (all dependencies satisfied)
-- `status: "open"` 
-- Leaf tasks (no children of their own) - these are the actual work items
+Use `"$RALPH_TASKS" status --feature "$PARENT_TASK_ID"` when you need the completed/ready/blocked summary.
 
-**CRITICAL:** Skip container tasks that exist only to group other tasks. A container task has other tasks with its ID as their `parentID`.
+**CRITICAL:** Skip container tasks that exist only to group other tasks. `--leaf-only` should do this for you.
 
 ### 2. If no ready tasks
 
-Check if all descendant tasks are completed:
-- Query `task_list list` with `repoURL: "<repo-url>"` (no ready filter)
-- Build the full descendant set (same recursive approach as step 1)
-- If all leaf tasks in the descendant set are `completed`:
+Check if any open leaf tasks remain:
+- Query `"$RALPH_TASKS" list-tasks --feature "$PARENT_TASK_ID" --status open --leaf-only --json`
+- If no open leaf tasks remain:
   1. Archive progress.txt:
      ```bash
      DATE=$(date +%Y-%m-%d)
@@ -527,9 +532,9 @@ Check if all descendant tasks are completed:
   2. Create fresh progress.txt with empty template
   3. Clear parent-task-id.txt: `echo "" > scripts/ralph/parent-task-id.txt`
   4. Commit: `git add scripts/ralph && git commit -m "chore: archive progress for [feature-name]"`
-  5. Mark the parent task as `completed`
+  5. Mark the parent task as `completed`: `"$RALPH_TASKS" complete-feature --feature "$PARENT_TASK_ID"`
   6. Stop and report "✅ Build complete - all tasks finished!"
-- If some are blocked: Report which tasks are blocked and why
+- If some are blocked: Report which tasks are blocked and why using `"$RALPH_TASKS" status --feature "$PARENT_TASK_ID"`
 
 ### 3. If ready tasks exist
 
@@ -578,7 +583,7 @@ When complete:
 
 5. Commit all changes with message: `feat: [Task Title]`
 
-6. Mark task as completed: `task_list action: "update", taskID: "[task-id]", status: "completed"`
+6. Mark task as completed: `"$RALPH_TASKS" update-task --feature "$PARENT_TASK_ID" --task "[task-id]" --status completed`
 
 7. Invoke the ralph skill to continue the loop
 ```
@@ -624,7 +629,7 @@ While working, **liberally create new tasks** when you discover:
 - Build/lint warnings
 - Performance issues
 
-Use `task_list action: "create"` immediately. Set appropriate `dependsOn` relationships.
+Use `"$RALPH_TASKS" add-task ...` immediately. Set appropriate `dependsOn` relationships.
 
 ---
 
@@ -667,8 +672,8 @@ When no ready tasks remain AND all tasks are completed:
 
 ## Important Notes
 
-- Always use `ready: true` when listing tasks to only get tasks with satisfied dependencies
-- Always use `limit: 5-10` when listing tasks to avoid context overflow
+- Always use `"$RALPH_TASKS" list-tasks --feature "$PARENT_TASK_ID" --ready --leaf-only` to only get tasks with satisfied dependencies
+- Use `"$RALPH_TASKS" status --feature "$PARENT_TASK_ID"` when you need the ready/completed/blocked summary
 - Each handoff runs in a fresh thread with clean context
 - Progress.txt is the memory between iterations - keep it updated
 - Prefer tasks in the same area as just-completed work for better context continuity
