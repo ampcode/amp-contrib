@@ -1,0 +1,2137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+FEATURES_REF_PREFIX='refs/ralph/features'
+ACTIVE_REF='refs/ralph/active'
+
+TEMP_PATHS=()
+REPO_GIT_DIR=''
+
+FEATURE_ID=''
+FEATURE_TITLE=''
+FEATURE_DESCRIPTION=''
+FEATURE_STATUS=''
+FEATURE_CREATED_AT=''
+FEATURE_UPDATED_AT=''
+FEATURE_REPO_ORIGIN=''
+FEATURE_NEXT_TASK_NUMBER='1'
+FEATURE_REF=''
+FEATURE_ACTIVE='0'
+
+FEATURE_COUNT_TOTAL=0
+FEATURE_COUNT_LEAF=0
+FEATURE_COUNT_CONTAINER=0
+FEATURE_COUNT_COMPLETED=0
+FEATURE_COUNT_COMPLETED_LEAF=0
+FEATURE_COUNT_OPEN=0
+FEATURE_COUNT_OPEN_LEAF=0
+FEATURE_COUNT_READY_LEAF=0
+FEATURE_COUNT_BLOCKED_LEAF=0
+
+TASK_IDS=()
+PATTERN_KEYS=()
+PROGRESS_KEYS=()
+VALIDATION_ISSUES=()
+
+cleanup_temp_paths() {
+  local path
+  for path in "${TEMP_PATHS[@]}"; do
+    if [ -e "$path" ]; then
+      rm -rf -- "$path"
+    fi
+  done
+  return 0
+}
+trap cleanup_temp_paths EXIT
+
+register_temp_path() {
+  TEMP_PATHS+=("$1")
+}
+
+make_temp_dir() {
+  local path
+  path=$(mktemp -d)
+  register_temp_path "$path"
+  printf '%s\n' "$path"
+}
+
+make_temp_file() {
+  local path
+  path=$(mktemp)
+  register_temp_path "$path"
+  printf '%s\n' "$path"
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+usage: ralph-tasks <command> [options]
+
+Commands:
+  init-feature        Create a new Ralph feature
+  list-features       List Ralph features
+  show-feature        Show a Ralph feature
+  activate-feature    Activate a Ralph feature
+  deactivate-feature  Clear the active Ralph feature
+  current-feature     Show the active Ralph feature
+  add-task            Add a task to the current feature
+  update-task         Update a task
+  list-tasks          List tasks
+  status              Show feature status
+  append-progress     Append a progress entry
+  add-pattern         Record a reusable codebase pattern
+  validate-feature    Validate task graph integrity
+  complete-feature    Complete a feature
+USAGE
+}
+
+usage_init_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks init-feature --title <title> [--description <text> | --description-file <path>] [--json] [--no-activate]
+USAGE
+}
+
+usage_list_features() {
+  cat <<'USAGE'
+usage: ralph-tasks list-features [--status open|completed] [--json]
+USAGE
+}
+
+usage_show_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks show-feature [--feature <feature-id>] [--json]
+USAGE
+}
+
+usage_activate_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks activate-feature --feature <feature-id> [--json]
+USAGE
+}
+
+usage_deactivate_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks deactivate-feature
+USAGE
+}
+
+usage_current_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks current-feature [--json]
+USAGE
+}
+
+usage_add_task() {
+  cat <<'USAGE'
+usage: ralph-tasks add-task [--feature <feature-id>] --title <title> [--description <text> | --description-file <path>] [--parent-task <task-id>] [--depends-on <task-id>]... [--json]
+USAGE
+}
+
+usage_update_task() {
+  cat <<'USAGE'
+usage: ralph-tasks update-task [--feature <feature-id>] --task <task-id> [--status open|completed] [--title <title>] [--description <text> | --description-file <path>] [--parent-task <task-id> | --clear-parent-task] [--replace-depends-on <task-id>]... [--clear-depends-on] [--json]
+USAGE
+}
+
+usage_list_tasks() {
+  cat <<'USAGE'
+usage: ralph-tasks list-tasks [--feature <feature-id>] [--status open|completed] [--ready] [--leaf-only] [--under-task <task-id>] [--json]
+USAGE
+}
+
+usage_status() {
+  cat <<'USAGE'
+usage: ralph-tasks status [--feature <feature-id>] [--json]
+USAGE
+}
+
+usage_append_progress() {
+  cat <<'USAGE'
+usage: ralph-tasks append-progress [--feature <feature-id>] [--task <task-id>] --title <title> [--thread-url <url>] [--body <text> | --body-file <path>] [--json]
+USAGE
+}
+
+usage_add_pattern() {
+  cat <<'USAGE'
+usage: ralph-tasks add-pattern [--feature <feature-id>] [--text <text> | --text-file <path>] [--json]
+USAGE
+}
+
+usage_validate_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks validate-feature [--feature <feature-id>] [--json]
+USAGE
+}
+
+usage_complete_feature() {
+  cat <<'USAGE'
+usage: ralph-tasks complete-feature [--feature <feature-id>] [--force] [--json]
+USAGE
+}
+
+require_git_repo() {
+  REPO_GIT_DIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || die 'Must be run inside a Git repository.'
+}
+
+now_iso() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+feature_stamp() {
+  date -u '+%Y%m%d-%H%M%S'
+}
+
+entry_stamp() {
+  date -u '+%Y%m%dT%H%M%SZ'
+}
+
+random_hex() {
+  od -An -N3 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+slugify() {
+  local slug
+  slug=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g')
+  slug=${slug:0:48}
+  [ -n "$slug" ] || slug='feature'
+  printf '%s\n' "$slug"
+}
+
+feature_ref() {
+  printf '%s/%s\n' "$FEATURES_REF_PREFIX" "$1"
+}
+
+feature_commit() {
+  git rev-parse -q --verify "$(feature_ref "$1")^{commit}" 2>/dev/null || true
+}
+
+current_active_target() {
+  git symbolic-ref -q "$ACTIVE_REF" 2>/dev/null || true
+}
+
+active_feature_id() {
+  local target
+  target=$(current_active_target)
+  [ -n "$target" ] || return 1
+  case "$target" in
+    "$FEATURES_REF_PREFIX"/*)
+      printf '%s\n' "${target#$FEATURES_REF_PREFIX/}"
+      ;;
+    *)
+      die "$ACTIVE_REF points to an unexpected ref: $target"
+      ;;
+  esac
+}
+
+set_active_feature() {
+  git symbolic-ref -m "ralph: activate $1" "$ACTIVE_REF" "$(feature_ref "$1")" >/dev/null
+}
+
+clear_active_feature() {
+  git symbolic-ref --delete "$ACTIVE_REF" >/dev/null 2>&1 || true
+}
+
+resolve_feature_id() {
+  local requested=${1:-}
+  if [ -n "$requested" ]; then
+    printf '%s\n' "$requested"
+    return 0
+  fi
+  active_feature_id || die 'No active Ralph feature. Activate one with activate-feature or create a new feature.'
+}
+
+read_file() {
+  local path=$1
+  if [ -f "$path" ]; then
+    cat "$path"
+  fi
+}
+
+write_file() {
+  local path=$1
+  local value=${2-}
+  mkdir -p "$(dirname "$path")"
+  printf '%s' "$value" > "$path"
+}
+
+ensure_dir() {
+  mkdir -p "$1"
+}
+
+maybe_origin_url() {
+  git remote get-url origin 2>/dev/null || true
+}
+
+resolve_text_input() {
+  local name=$1
+  local has_text=$2
+  local text=$3
+  local has_file=$4
+  local file=$5
+  local allow_stdin=$6
+  local result='' non_ws=''
+
+  if [ "$has_text" -eq 1 ] && [ "$has_file" -eq 1 ]; then
+    die "Use either --$name or --$name-file, not both."
+  fi
+
+  if [ "$has_text" -eq 1 ]; then
+    result=$text
+  elif [ "$has_file" -eq 1 ]; then
+    if [ "$file" = '-' ]; then
+      result=$(cat)
+    else
+      result=$(cat "$file") || die "Could not read $name file $file"
+    fi
+  elif [ "$allow_stdin" -eq 1 ] && [ ! -t 0 ]; then
+    result=$(cat)
+  else
+    die "Provide --$name or --$name-file."
+  fi
+
+  non_ws=$(printf '%s' "$result" | tr -d '[:space:]')
+  [ -n "$non_ws" ] || die "$name cannot be empty."
+  TEXT_RESULT=$result
+}
+
+json_escape() {
+  awk 'BEGIN { ORS=""; first=1 }
+    {
+      gsub(/\\/, "\\\\")
+      gsub(/"/, "\\\"")
+      gsub(/\t/, "\\t")
+      gsub(/\r/, "\\r")
+      if (!first) {
+        printf "\\n"
+      }
+      printf "%s", $0
+      first=0
+    }
+  '
+}
+
+json_quote() {
+  printf '"'
+  printf '%s' "$1" | json_escape
+  printf '"'
+}
+
+json_nullable_string() {
+  if [ -n "${1:-}" ]; then
+    json_quote "$1"
+  else
+    printf 'null'
+  fi
+}
+
+json_bool() {
+  if [ "${1:-0}" = '1' ]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+json_print_lines_array() {
+  local data=${1-}
+  local first=1
+  local line
+  printf '['
+  if [ -n "$data" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      if [ $first -eq 0 ]; then
+        printf ','
+      fi
+      json_quote "$line"
+      first=0
+    done <<< "$data"
+  fi
+  printf ']'
+}
+
+join_by() {
+  local separator=$1
+  shift
+  local first=1
+  local item
+  for item in "$@"; do
+    if [ $first -eq 1 ]; then
+      printf '%s' "$item"
+      first=0
+    else
+      printf '%s%s' "$separator" "$item"
+    fi
+  done
+}
+
+append_line() {
+  local existing=${1-}
+  local value=${2-}
+  if [ -n "$existing" ]; then
+    printf '%s\n%s' "$existing" "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+feature_field_path() {
+  printf '%s/feature/%s\n' "$1" "$2"
+}
+
+task_dir_path() {
+  printf '%s/tasks/%s\n' "$1" "$2"
+}
+
+task_field_path() {
+  printf '%s/tasks/%s/%s\n' "$1" "$2" "$3"
+}
+
+init_feature_tree() {
+  local dir=$1
+  local feature_id=$2
+  local title=$3
+  local description=$4
+  local timestamp=$5
+  local origin=$6
+
+  write_file "$(feature_field_path "$dir" id)" "$feature_id"
+  write_file "$(feature_field_path "$dir" title)" "$title"
+  write_file "$(feature_field_path "$dir" description)" "$description"
+  write_file "$(feature_field_path "$dir" status)" 'open'
+  write_file "$(feature_field_path "$dir" created-at)" "$timestamp"
+  write_file "$(feature_field_path "$dir" updated-at)" "$timestamp"
+  write_file "$(feature_field_path "$dir" repo-origin)" "$origin"
+  write_file "$(feature_field_path "$dir" next-task-number)" '1'
+}
+
+unpack_feature_dir() {
+  local feature_id=$1
+  local commit dir
+  commit=$(feature_commit "$feature_id")
+  [ -n "$commit" ] || die "Feature does not exist: $feature_id"
+  dir=$(make_temp_dir)
+  git archive "$commit" | tar -x -C "$dir"
+  printf '%s\n' "$dir"
+}
+
+write_commit_from_dir() {
+  local dir=$1
+  local parent_commit=${2-}
+  local message=$3
+  local index tree commit
+
+  index=$(make_temp_file)
+  rm -f -- "$index"
+
+  GIT_INDEX_FILE="$index" git -C "$dir" --git-dir="$REPO_GIT_DIR" --work-tree="$dir" add -A . >/dev/null
+  tree=$(GIT_INDEX_FILE="$index" git --git-dir="$REPO_GIT_DIR" write-tree)
+
+  if [ -n "$parent_commit" ]; then
+    commit=$(
+      GIT_AUTHOR_NAME='Ralph' \
+      GIT_AUTHOR_EMAIL='ralph@local' \
+      GIT_COMMITTER_NAME='Ralph' \
+      GIT_COMMITTER_EMAIL='ralph@local' \
+      git --git-dir="$REPO_GIT_DIR" commit-tree "$tree" -p "$parent_commit" -m "$message"
+    )
+  else
+    commit=$(
+      GIT_AUTHOR_NAME='Ralph' \
+      GIT_AUTHOR_EMAIL='ralph@local' \
+      GIT_COMMITTER_NAME='Ralph' \
+      GIT_COMMITTER_EMAIL='ralph@local' \
+      git --git-dir="$REPO_GIT_DIR" commit-tree "$tree" -m "$message"
+    )
+  fi
+
+  printf '%s\n' "$commit"
+}
+
+sort_task_ids() {
+  sort -t- -k2,2n -k1,1
+}
+
+list_task_ids_in_dir() {
+  local dir=$1
+  if [ -d "$dir/tasks" ]; then
+    find "$dir/tasks" -mindepth 1 -maxdepth 1 -type d -name 'task-*' -printf '%f\n' | sort_task_ids
+  fi
+}
+
+list_pattern_keys_in_dir() {
+  local dir=$1
+  if [ -d "$dir/patterns" ]; then
+    find "$dir/patterns" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort
+  fi
+}
+
+list_progress_keys_in_dir() {
+  local dir=$1
+  if [ -d "$dir/progress" ]; then
+    find "$dir/progress" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+  fi
+}
+
+reset_loaded_state() {
+  FEATURE_ID=''
+  FEATURE_TITLE=''
+  FEATURE_DESCRIPTION=''
+  FEATURE_STATUS=''
+  FEATURE_CREATED_AT=''
+  FEATURE_UPDATED_AT=''
+  FEATURE_REPO_ORIGIN=''
+  FEATURE_NEXT_TASK_NUMBER='1'
+  FEATURE_REF=''
+  FEATURE_ACTIVE='0'
+
+  FEATURE_COUNT_TOTAL=0
+  FEATURE_COUNT_LEAF=0
+  FEATURE_COUNT_CONTAINER=0
+  FEATURE_COUNT_COMPLETED=0
+  FEATURE_COUNT_COMPLETED_LEAF=0
+  FEATURE_COUNT_OPEN=0
+  FEATURE_COUNT_OPEN_LEAF=0
+  FEATURE_COUNT_READY_LEAF=0
+  FEATURE_COUNT_BLOCKED_LEAF=0
+
+  TASK_IDS=()
+  PATTERN_KEYS=()
+  PROGRESS_KEYS=()
+
+  unset TASK_TITLE TASK_STATUS TASK_PARENT TASK_CREATED TASK_UPDATED TASK_DESCRIPTION TASK_DEPS TASK_CHILDREN TASK_CHILD_COUNT TASK_IS_LEAF TASK_READY TASK_BLOCKED
+  declare -gA TASK_TITLE=()
+  declare -gA TASK_STATUS=()
+  declare -gA TASK_PARENT=()
+  declare -gA TASK_CREATED=()
+  declare -gA TASK_UPDATED=()
+  declare -gA TASK_DESCRIPTION=()
+  declare -gA TASK_DEPS=()
+  declare -gA TASK_CHILDREN=()
+  declare -gA TASK_CHILD_COUNT=()
+  declare -gA TASK_IS_LEAF=()
+  declare -gA TASK_READY=()
+  declare -gA TASK_BLOCKED=()
+
+  unset PATTERN_TEXT
+  declare -gA PATTERN_TEXT=()
+
+  unset PROGRESS_TIMESTAMP PROGRESS_TASK_ID PROGRESS_TITLE PROGRESS_THREAD_URL PROGRESS_BODY
+  declare -gA PROGRESS_TIMESTAMP=()
+  declare -gA PROGRESS_TASK_ID=()
+  declare -gA PROGRESS_TITLE=()
+  declare -gA PROGRESS_THREAD_URL=()
+  declare -gA PROGRESS_BODY=()
+}
+
+compute_task_blockers() {
+  local task_id=$1
+  local deps=${TASK_DEPS["$task_id"]:-}
+  local blocked=''
+  local dep
+
+  if [ -n "$deps" ]; then
+    while IFS= read -r dep || [ -n "$dep" ]; do
+      [ -n "$dep" ] || continue
+      if [ "${TASK_STATUS["$dep"]:-missing}" != 'completed' ]; then
+        blocked=$(append_line "$blocked" "$dep")
+      fi
+    done <<< "$deps"
+  fi
+
+  TASK_BLOCKED["$task_id"]=$blocked
+  if [ "${TASK_STATUS["$task_id"]}" = 'open' ] && [ -z "$blocked" ]; then
+    TASK_READY["$task_id"]=1
+  else
+    TASK_READY["$task_id"]=0
+  fi
+}
+
+compute_feature_counts() {
+  local task_id
+  FEATURE_COUNT_TOTAL=${#TASK_IDS[@]}
+  FEATURE_COUNT_LEAF=0
+  FEATURE_COUNT_CONTAINER=0
+  FEATURE_COUNT_COMPLETED=0
+  FEATURE_COUNT_COMPLETED_LEAF=0
+  FEATURE_COUNT_OPEN=0
+  FEATURE_COUNT_OPEN_LEAF=0
+  FEATURE_COUNT_READY_LEAF=0
+  FEATURE_COUNT_BLOCKED_LEAF=0
+
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ]; then
+      FEATURE_COUNT_LEAF=$((FEATURE_COUNT_LEAF + 1))
+      if [ "${TASK_STATUS["$task_id"]}" = 'completed' ]; then
+        FEATURE_COUNT_COMPLETED_LEAF=$((FEATURE_COUNT_COMPLETED_LEAF + 1))
+      else
+        FEATURE_COUNT_OPEN_LEAF=$((FEATURE_COUNT_OPEN_LEAF + 1))
+        if [ "${TASK_READY["$task_id"]}" = '1' ]; then
+          FEATURE_COUNT_READY_LEAF=$((FEATURE_COUNT_READY_LEAF + 1))
+        else
+          FEATURE_COUNT_BLOCKED_LEAF=$((FEATURE_COUNT_BLOCKED_LEAF + 1))
+        fi
+      fi
+    else
+      FEATURE_COUNT_CONTAINER=$((FEATURE_COUNT_CONTAINER + 1))
+    fi
+
+    if [ "${TASK_STATUS["$task_id"]}" = 'completed' ]; then
+      FEATURE_COUNT_COMPLETED=$((FEATURE_COUNT_COMPLETED + 1))
+    else
+      FEATURE_COUNT_OPEN=$((FEATURE_COUNT_OPEN + 1))
+    fi
+  done
+}
+
+load_feature_data_dir() {
+  local dir=$1
+  local task_id parent key timestamp active_id
+
+  reset_loaded_state
+
+  FEATURE_ID=$(read_file "$(feature_field_path "$dir" id)")
+  FEATURE_TITLE=$(read_file "$(feature_field_path "$dir" title)")
+  FEATURE_DESCRIPTION=$(read_file "$(feature_field_path "$dir" description)")
+  FEATURE_STATUS=$(read_file "$(feature_field_path "$dir" status)")
+  FEATURE_CREATED_AT=$(read_file "$(feature_field_path "$dir" created-at)")
+  FEATURE_UPDATED_AT=$(read_file "$(feature_field_path "$dir" updated-at)")
+  FEATURE_REPO_ORIGIN=$(read_file "$(feature_field_path "$dir" repo-origin)")
+  FEATURE_NEXT_TASK_NUMBER=$(read_file "$(feature_field_path "$dir" next-task-number)")
+  FEATURE_REF=$(feature_ref "$FEATURE_ID")
+
+  active_id=$(active_feature_id 2>/dev/null || true)
+  if [ "$active_id" = "$FEATURE_ID" ]; then
+    FEATURE_ACTIVE='1'
+  else
+    FEATURE_ACTIVE='0'
+  fi
+
+  while IFS= read -r task_id || [ -n "$task_id" ]; do
+    [ -n "$task_id" ] || continue
+    TASK_IDS+=("$task_id")
+    TASK_TITLE["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" title)")
+    TASK_STATUS["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" status)")
+    TASK_PARENT["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" parent-task-id)")
+    TASK_CREATED["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" created-at)")
+    TASK_UPDATED["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" updated-at)")
+    TASK_DESCRIPTION["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" description)")
+    TASK_DEPS["$task_id"]=$(read_file "$(task_field_path "$dir" "$task_id" depends-on)")
+    TASK_CHILD_COUNT["$task_id"]=0
+    TASK_CHILDREN["$task_id"]=''
+  done < <(list_task_ids_in_dir "$dir")
+
+  for task_id in "${TASK_IDS[@]}"; do
+    parent=${TASK_PARENT["$task_id"]:-}
+    if [ -n "$parent" ]; then
+      TASK_CHILD_COUNT["$parent"]=$(( ${TASK_CHILD_COUNT["$parent"]:-0} + 1 ))
+      TASK_CHILDREN["$parent"]=$(append_line "${TASK_CHILDREN["$parent"]:-}" "$task_id")
+    fi
+  done
+
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ "${TASK_CHILD_COUNT["$task_id"]:-0}" -eq 0 ]; then
+      TASK_IS_LEAF["$task_id"]=1
+    else
+      TASK_IS_LEAF["$task_id"]=0
+    fi
+    compute_task_blockers "$task_id"
+  done
+
+  while IFS= read -r key || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    PATTERN_KEYS+=("$key")
+    PATTERN_TEXT["$key"]=$(read_file "$dir/patterns/$key")
+  done < <(list_pattern_keys_in_dir "$dir")
+
+  while IFS= read -r key || [ -n "$key" ]; do
+    [ -n "$key" ] || continue
+    PROGRESS_KEYS+=("$key")
+    PROGRESS_TIMESTAMP["$key"]=$(read_file "$dir/progress/$key/timestamp")
+    PROGRESS_TASK_ID["$key"]=$(read_file "$dir/progress/$key/task-id")
+    PROGRESS_TITLE["$key"]=$(read_file "$dir/progress/$key/title")
+    PROGRESS_THREAD_URL["$key"]=$(read_file "$dir/progress/$key/thread-url")
+    PROGRESS_BODY["$key"]=$(read_file "$dir/progress/$key/body")
+  done < <(list_progress_keys_in_dir "$dir")
+
+  compute_feature_counts
+}
+
+VALIDATION_SEEN_KEYS=()
+
+auto_reset_validation() {
+  VALIDATION_ISSUES=()
+  unset VALIDATION_SEEN
+  declare -gA VALIDATION_SEEN=()
+}
+
+add_validation_issue() {
+  local code=$1
+  local task_id=$2
+  local message=$3
+  local key
+  key="$code|$task_id|$message"
+  if [ -n "${VALIDATION_SEEN[$key]:-}" ]; then
+    return 0
+  fi
+  VALIDATION_SEEN[$key]=1
+  VALIDATION_ISSUES+=("$code"$'\t'"$task_id"$'\t'"$message")
+}
+
+format_cycle_from_stack() {
+  local target=$1
+  local start=-1
+  local i
+  local -a cycle=()
+
+  for ((i=0; i<${#DFS_STACK[@]}; i++)); do
+    if [ "${DFS_STACK[$i]}" = "$target" ]; then
+      start=$i
+      break
+    fi
+  done
+
+  if [ "$start" -ge 0 ]; then
+    for ((i=start; i<${#DFS_STACK[@]}; i++)); do
+      cycle+=("${DFS_STACK[$i]}")
+    done
+    cycle+=("$target")
+    join_by ' -> ' "${cycle[@]}"
+  else
+    join_by ' -> ' "${DFS_STACK[@]}" "$target"
+  fi
+}
+
+DFS_STACK=()
+
+dfs_dependency_cycle() {
+  local task_id=$1
+  local deps dep color
+
+  DFS_COLOR["$task_id"]=1
+  DFS_STACK+=("$task_id")
+  deps=${TASK_DEPS["$task_id"]:-}
+
+  if [ -n "$deps" ]; then
+    while IFS= read -r dep || [ -n "$dep" ]; do
+      [ -n "$dep" ] || continue
+      color=${DFS_COLOR["$dep"]:-0}
+      if [ "$color" = '0' ]; then
+        dfs_dependency_cycle "$dep"
+      elif [ "$color" = '1' ]; then
+        add_validation_issue 'dependency-cycle' "$task_id" "Dependency cycle detected: $(format_cycle_from_stack "$dep")"
+      fi
+    done <<< "$deps"
+  fi
+
+  unset 'DFS_STACK[${#DFS_STACK[@]}-1]'
+  DFS_COLOR["$task_id"]=2
+}
+
+validate_loaded_feature() {
+  local task_id status parent deps dep
+  auto_reset_validation
+
+  if [ "$FEATURE_STATUS" != 'open' ] && [ "$FEATURE_STATUS" != 'completed' ]; then
+    add_validation_issue 'invalid-feature-status' '' "Feature has invalid status: $FEATURE_STATUS"
+  fi
+
+  unset TASK_PRESENT
+  declare -gA TASK_PRESENT=()
+  for task_id in "${TASK_IDS[@]}"; do
+    TASK_PRESENT["$task_id"]=1
+  done
+
+  for task_id in "${TASK_IDS[@]}"; do
+    status=${TASK_STATUS["$task_id"]:-}
+    if [ "$status" != 'open' ] && [ "$status" != 'completed' ]; then
+      add_validation_issue 'invalid-status' "$task_id" "Task $task_id has invalid status: $status"
+    fi
+
+    parent=${TASK_PARENT["$task_id"]:-}
+    if [ -n "$parent" ]; then
+      if [ "$parent" = "$task_id" ]; then
+        add_validation_issue 'self-parent' "$task_id" "Task $task_id cannot be its own parent."
+      elif [ -z "${TASK_PRESENT["$parent"]:-}" ]; then
+        add_validation_issue 'missing-parent' "$task_id" "Task $task_id references missing parent task $parent."
+      fi
+    fi
+
+    deps=${TASK_DEPS["$task_id"]:-}
+    if [ -n "$deps" ]; then
+      unset SEEN_DEP
+      declare -A SEEN_DEP=()
+      while IFS= read -r dep || [ -n "$dep" ]; do
+        [ -n "$dep" ] || continue
+        if [ -n "${SEEN_DEP["$dep"]:-}" ]; then
+          add_validation_issue 'duplicate-dependency' "$task_id" "Task $task_id has duplicate dependencies."
+        fi
+        SEEN_DEP["$dep"]=1
+        if [ "$dep" = "$task_id" ]; then
+          add_validation_issue 'self-dependency' "$task_id" "Task $task_id cannot depend on itself."
+        elif [ -z "${TASK_PRESENT["$dep"]:-}" ]; then
+          add_validation_issue 'missing-dependency' "$task_id" "Task $task_id references missing dependency $dep."
+        fi
+      done <<< "$deps"
+    fi
+  done
+
+  for task_id in "${TASK_IDS[@]}"; do
+    local current="$task_id"
+    local chain=("$task_id")
+    local parent_id=${TASK_PARENT["$task_id"]:-}
+    unset SEEN_PARENT
+    declare -A SEEN_PARENT=()
+
+    while [ -n "$parent_id" ]; do
+      chain+=("$parent_id")
+      if [ "$parent_id" = "$current" ] || [ -n "${SEEN_PARENT["$parent_id"]:-}" ]; then
+        add_validation_issue 'parent-cycle' "$task_id" "Parent cycle detected: $(join_by ' -> ' "${chain[@]}")"
+        break
+      fi
+      SEEN_PARENT["$parent_id"]=1
+      parent_id=${TASK_PARENT["$parent_id"]:-}
+    done
+  done
+
+  unset DFS_COLOR
+  declare -gA DFS_COLOR=()
+  DFS_STACK=()
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ "${DFS_COLOR["$task_id"]:-0}" = '0' ]; then
+      dfs_dependency_cycle "$task_id"
+    fi
+  done
+}
+
+ensure_valid_feature_dir() {
+  local dir=$1
+  local issue record count=0
+  load_feature_data_dir "$dir"
+  validate_loaded_feature
+  if [ ${#VALIDATION_ISSUES[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  printf 'Invalid feature state:\n' >&2
+  for record in "${VALIDATION_ISSUES[@]}"; do
+    issue=${record#*$'\t'*$'\t'}
+    printf -- '- %s\n' "$issue" >&2
+    count=$((count + 1))
+    [ $count -lt 10 ] || break
+  done
+  exit 1
+}
+
+update_feature_with_retry() {
+  local feature_id=$1
+  local message=$2
+  local mutator=$3
+  local old_commit dir new_commit attempt
+
+  for attempt in 1 2 3 4 5 6 7 8; do
+    old_commit=$(feature_commit "$feature_id")
+    [ -n "$old_commit" ] || die "Feature does not exist: $feature_id"
+    dir=$(unpack_feature_dir "$feature_id")
+    "$mutator" "$dir"
+    write_file "$(feature_field_path "$dir" updated-at)" "$(now_iso)"
+    ensure_valid_feature_dir "$dir"
+    new_commit=$(write_commit_from_dir "$dir" "$old_commit" "$message")
+    if git update-ref --create-reflog -m "$message" "$(feature_ref "$feature_id")" "$new_commit" "$old_commit" >/dev/null 2>&1; then
+      UPDATE_FEATURE_DIR=$dir
+      return 0
+    fi
+  done
+
+  die "Could not update feature $feature_id after several retries"
+}
+
+print_json_counts_object() {
+  printf '{'
+  printf '"blockedLeaf":%s,' "$FEATURE_COUNT_BLOCKED_LEAF"
+  printf '"completed":%s,' "$FEATURE_COUNT_COMPLETED"
+  printf '"completedLeaf":%s,' "$FEATURE_COUNT_COMPLETED_LEAF"
+  printf '"container":%s,' "$FEATURE_COUNT_CONTAINER"
+  printf '"leaf":%s,' "$FEATURE_COUNT_LEAF"
+  printf '"open":%s,' "$FEATURE_COUNT_OPEN"
+  printf '"openLeaf":%s,' "$FEATURE_COUNT_OPEN_LEAF"
+  printf '"readyLeaf":%s,' "$FEATURE_COUNT_READY_LEAF"
+  printf '"total":%s' "$FEATURE_COUNT_TOTAL"
+  printf '}'
+}
+
+print_json_feature_object() {
+  printf '{'
+  printf '"createdAt":'; json_quote "$FEATURE_CREATED_AT"; printf ','
+  printf '"description":'; json_quote "$FEATURE_DESCRIPTION"; printf ','
+  printf '"id":'; json_quote "$FEATURE_ID"; printf ','
+  printf '"repoOrigin":'; json_nullable_string "$FEATURE_REPO_ORIGIN"; printf ','
+  printf '"status":'; json_quote "$FEATURE_STATUS"; printf ','
+  printf '"title":'; json_quote "$FEATURE_TITLE"; printf ','
+  printf '"updatedAt":'; json_quote "$FEATURE_UPDATED_AT"
+  printf '}'
+}
+
+print_json_task_object() {
+  local task_id=$1
+  printf '{'
+  printf '"blockedOn":'; json_print_lines_array "${TASK_BLOCKED["$task_id"]:-}"; printf ','
+  printf '"childTaskIds":'; json_print_lines_array "${TASK_CHILDREN["$task_id"]:-}"; printf ','
+  printf '"createdAt":'; json_quote "${TASK_CREATED["$task_id"]}"; printf ','
+  printf '"dependsOn":'; json_print_lines_array "${TASK_DEPS["$task_id"]:-}"; printf ','
+  printf '"description":'; json_quote "${TASK_DESCRIPTION["$task_id"]}"; printf ','
+  printf '"id":'; json_quote "$task_id"; printf ','
+  printf '"isLeaf":'; json_bool "${TASK_IS_LEAF["$task_id"]}"; printf ','
+  printf '"parentTaskId":'; json_nullable_string "${TASK_PARENT["$task_id"]:-}"; printf ','
+  printf '"ready":'; json_bool "${TASK_READY["$task_id"]}"; printf ','
+  printf '"status":'; json_quote "${TASK_STATUS["$task_id"]}"; printf ','
+  printf '"title":'; json_quote "${TASK_TITLE["$task_id"]}"; printf ','
+  printf '"updatedAt":'; json_quote "${TASK_UPDATED["$task_id"]}"
+  printf '}'
+}
+
+print_json_progress_object() {
+  local key=$1
+  printf '{'
+  printf '"body":'; json_quote "${PROGRESS_BODY["$key"]}"; printf ','
+  printf '"taskId":'; json_nullable_string "${PROGRESS_TASK_ID["$key"]:-}"; printf ','
+  printf '"threadURL":'; json_nullable_string "${PROGRESS_THREAD_URL["$key"]:-}"; printf ','
+  printf '"timestamp":'; json_quote "${PROGRESS_TIMESTAMP["$key"]}"; printf ','
+  printf '"title":'; json_quote "${PROGRESS_TITLE["$key"]}"
+  printf '}'
+}
+
+print_json_task_array() {
+  local first=1 task_id
+  printf '['
+  for task_id in "$@"; do
+    if [ $first -eq 0 ]; then
+      printf ','
+    fi
+    print_json_task_object "$task_id"
+    first=0
+  done
+  printf ']'
+}
+
+print_json_pattern_array() {
+  local first=1 key
+  printf '['
+  for key in "${PATTERN_KEYS[@]}"; do
+    if [ $first -eq 0 ]; then
+      printf ','
+    fi
+    json_quote "${PATTERN_TEXT["$key"]}"
+    first=0
+  done
+  printf ']'
+}
+
+print_json_progress_array() {
+  local first=1 key
+  printf '['
+  for key in "${PROGRESS_KEYS[@]}"; do
+    if [ $first -eq 0 ]; then
+      printf ','
+    fi
+    print_json_progress_object "$key"
+    first=0
+  done
+  printf ']'
+}
+
+print_json_feature_view() {
+  local task_id
+  local -a ready_ids=() blocked_ids=()
+  printf '{'
+  printf '"active":'; json_bool "$FEATURE_ACTIVE"; printf ','
+  printf '"blockedTasks":'
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ] && [ "${TASK_STATUS["$task_id"]}" = 'open' ] && [ "${TASK_READY["$task_id"]}" != '1' ]; then
+      blocked_ids+=("$task_id")
+    fi
+  done
+  print_json_task_array "${blocked_ids[@]}"
+  printf ','
+  printf '"codebasePatterns":'
+  print_json_pattern_array
+  printf ','
+  printf '"counts":'
+  print_json_counts_object
+  printf ','
+  printf '"feature":'
+  print_json_feature_object
+  printf ','
+  printf '"featureRef":'; json_quote "$FEATURE_REF"; printf ','
+  printf '"progress":'
+  print_json_progress_array
+  printf ','
+  printf '"readyTasks":'
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ] && [ "${TASK_READY["$task_id"]}" = '1' ]; then
+      ready_ids+=("$task_id")
+    fi
+  done
+  print_json_task_array "${ready_ids[@]}"
+  printf ','
+  printf '"tasks":'
+  print_json_task_array "${TASK_IDS[@]}"
+  printf '}'
+}
+
+print_json_validation_issues() {
+  local first=1 record code task_id message rest
+  printf '['
+  for record in "${VALIDATION_ISSUES[@]}"; do
+    code=${record%%$'\t'*}
+    rest=${record#*$'\t'}
+    task_id=${rest%%$'\t'*}
+    message=${rest#*$'\t'}
+    if [ $first -eq 0 ]; then
+      printf ','
+    fi
+    printf '{'
+    printf '"code":'; json_quote "$code"; printf ','
+    printf '"message":'; json_quote "$message"; printf ','
+    printf '"taskId":'; json_nullable_string "$task_id"
+    printf '}'
+    first=0
+  done
+  printf ']'
+}
+
+print_feature_summary() {
+  local detailed=${1:-0}
+  local task_id blockers active_text=''
+  if [ "$FEATURE_ACTIVE" = '1' ]; then
+    active_text=' [active]'
+  fi
+
+  printf 'Feature: %s (%s)%s\n' "$FEATURE_TITLE" "$FEATURE_ID" "$active_text"
+  printf 'Ref: %s\n' "$FEATURE_REF"
+  printf 'Status: %s\n' "$FEATURE_STATUS"
+  printf 'Updated: %s\n' "$FEATURE_UPDATED_AT"
+  printf 'Tasks: %s total | %s completed | %s ready leaf | %s blocked leaf\n' \
+    "$FEATURE_COUNT_TOTAL" "$FEATURE_COUNT_COMPLETED" "$FEATURE_COUNT_READY_LEAF" "$FEATURE_COUNT_BLOCKED_LEAF"
+  printf 'Patterns: %s | Progress entries: %s\n' "${#PATTERN_KEYS[@]}" "${#PROGRESS_KEYS[@]}"
+
+  if [ "$detailed" = '1' ] && [ -n "$FEATURE_DESCRIPTION" ]; then
+    printf 'Description: %s\n' "$FEATURE_DESCRIPTION"
+  fi
+
+  if [ "$FEATURE_COUNT_READY_LEAF" -gt 0 ]; then
+    printf 'Ready tasks:\n'
+    for task_id in "${TASK_IDS[@]}"; do
+      if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ] && [ "${TASK_READY["$task_id"]}" = '1' ]; then
+        printf -- '- %s %s\n' "$task_id" "${TASK_TITLE["$task_id"]}"
+      fi
+    done
+  fi
+
+  if [ "$FEATURE_COUNT_BLOCKED_LEAF" -gt 0 ]; then
+    printf 'Blocked tasks:\n'
+    for task_id in "${TASK_IDS[@]}"; do
+      if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ] && [ "${TASK_STATUS["$task_id"]}" = 'open' ] && [ "${TASK_READY["$task_id"]}" != '1' ]; then
+        blockers=$(printf '%s' "${TASK_BLOCKED["$task_id"]:-}" | paste -sd ', ' -)
+        printf -- '- %s %s (waiting on: %s)\n' "$task_id" "${TASK_TITLE["$task_id"]}" "${blockers:-unknown}"
+      fi
+    done
+  fi
+
+  if [ "$detailed" = '1' ] && [ ${#PATTERN_KEYS[@]} -gt 0 ]; then
+    printf 'Codebase patterns:\n'
+    local key
+    for key in "${PATTERN_KEYS[@]}"; do
+      printf -- '- %s\n' "${PATTERN_TEXT["$key"]}"
+    done
+  fi
+
+  if [ "$detailed" = '1' ] && [ ${#PROGRESS_KEYS[@]} -gt 0 ]; then
+    printf 'Recent progress:\n'
+    local start=0 index key task_label
+    if [ ${#PROGRESS_KEYS[@]} -gt 3 ]; then
+      start=$(( ${#PROGRESS_KEYS[@]} - 3 ))
+    fi
+    for ((index=start; index<${#PROGRESS_KEYS[@]}; index++)); do
+      key=${PROGRESS_KEYS[$index]}
+      task_label=${PROGRESS_TASK_ID["$key"]:-feature}
+      printf -- '- %s %s: %s\n' "${PROGRESS_TIMESTAMP["$key"]}" "$task_label" "${PROGRESS_TITLE["$key"]}"
+    done
+  fi
+}
+
+print_task_list_text() {
+  local task_id bits=()
+  if [ $# -eq 0 ]; then
+    printf 'No tasks found.\n'
+    return 0
+  fi
+
+  for task_id in "$@"; do
+    bits=("${TASK_STATUS["$task_id"]}")
+    if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ]; then
+      if [ "${TASK_READY["$task_id"]}" = '1' ]; then
+        bits+=('ready')
+      else
+        bits+=('blocked')
+      fi
+    else
+      bits+=('container')
+    fi
+
+    printf -- '- %s [%s] %s\n' "$task_id" "$(join_by ', ' "${bits[@]}")" "${TASK_TITLE["$task_id"]}"
+    if [ -n "${TASK_PARENT["$task_id"]:-}" ]; then
+      printf '  parent: %s\n' "${TASK_PARENT["$task_id"]}"
+    fi
+    if [ -n "${TASK_DEPS["$task_id"]:-}" ]; then
+      printf '  dependsOn: %s\n' "$(printf '%s' "${TASK_DEPS["$task_id"]}" | paste -sd ', ' -)"
+    fi
+    if [ -n "${TASK_BLOCKED["$task_id"]:-}" ]; then
+      printf '  blockedOn: %s\n' "$(printf '%s' "${TASK_BLOCKED["$task_id"]}" | paste -sd ', ' -)"
+    fi
+  done
+}
+
+collect_descendants() {
+  local root=$1
+  local queue=("$root")
+  local current children child
+
+  unset DESCENDANT_SET
+  declare -gA DESCENDANT_SET=()
+
+  while [ ${#queue[@]} -gt 0 ]; do
+    current=${queue[0]}
+    queue=("${queue[@]:1}")
+    if [ -n "${DESCENDANT_SET["$current"]:-}" ]; then
+      continue
+    fi
+    DESCENDANT_SET["$current"]=1
+    children=${TASK_CHILDREN["$current"]:-}
+    if [ -n "$children" ]; then
+      while IFS= read -r child || [ -n "$child" ]; do
+        [ -n "$child" ] || continue
+        queue+=("$child")
+      done <<< "$children"
+    fi
+  done
+}
+
+command_init_feature() {
+  local title='' description='' description_file='' description_has_text=0 description_has_file=0 activate=1 json=0
+  local feature_id dir commit origin
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title)
+        title=${2-}
+        shift 2
+        ;;
+      --description)
+        description=${2-}
+        description_has_text=1
+        shift 2
+        ;;
+      --description-file)
+        description_file=${2-}
+        description_has_file=1
+        shift 2
+        ;;
+      --activate)
+        activate=1
+        shift
+        ;;
+      --no-activate)
+        activate=0
+        shift
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_init_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$title" ] || die '--title is required.'
+  resolve_text_input description "$description_has_text" "$description" "$description_has_file" "$description_file" 0
+  description=$TEXT_RESULT
+
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    feature_id="$(feature_stamp)-$(slugify "$title")-$(random_hex)"
+    [ -z "$(feature_commit "$feature_id")" ] || continue
+    dir=$(make_temp_dir)
+    origin=$(maybe_origin_url)
+    init_feature_tree "$dir" "$feature_id" "$title" "$description" "$(now_iso)" "$origin"
+    commit=$(write_commit_from_dir "$dir" '' "ralph: init feature $feature_id")
+    if git update-ref --create-reflog -m "ralph: init feature $feature_id" "$(feature_ref "$feature_id")" "$commit" >/dev/null 2>&1; then
+      if [ "$activate" -eq 1 ]; then
+        set_active_feature "$feature_id"
+      fi
+      load_feature_data_dir "$dir"
+      if [ "$activate" -eq 1 ]; then
+        FEATURE_ACTIVE='1'
+      fi
+      if [ "$json" -eq 1 ]; then
+        print_json_feature_view
+        printf '\n'
+      else
+        print_feature_summary 1
+      fi
+      return 0
+    fi
+  done
+
+  die 'Could not allocate a unique Ralph feature id.'
+}
+
+command_list_features() {
+  local status_filter='' json=0
+  local refs ref feature_id dir active_id first=1
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status)
+        status_filter=${2-}
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_list_features
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  if [ -n "$status_filter" ] && [ "$status_filter" != 'open' ] && [ "$status_filter" != 'completed' ]; then
+    die '--status must be open or completed.'
+  fi
+
+  refs=$(git for-each-ref --format='%(refname)' "$FEATURES_REF_PREFIX")
+  if [ -z "$refs" ]; then
+    if [ "$json" -eq 1 ]; then
+      printf '[]\n'
+    else
+      printf 'No Ralph features found.\n'
+    fi
+    return 0
+  fi
+
+  if [ "$json" -eq 1 ]; then
+    printf '['
+    while IFS= read -r ref || [ -n "$ref" ]; do
+      [ -n "$ref" ] || continue
+      feature_id=${ref#$FEATURES_REF_PREFIX/}
+      dir=$(unpack_feature_dir "$feature_id")
+      load_feature_data_dir "$dir"
+      if [ -n "$status_filter" ] && [ "$FEATURE_STATUS" != "$status_filter" ]; then
+        continue
+      fi
+      if [ $first -eq 0 ]; then
+        printf ','
+      fi
+      printf '{'
+      printf '"active":'; json_bool "$FEATURE_ACTIVE"; printf ','
+      printf '"counts":'; print_json_counts_object; printf ','
+      printf '"featureRef":'; json_quote "$FEATURE_REF"; printf ','
+      printf '"id":'; json_quote "$FEATURE_ID"; printf ','
+      printf '"status":'; json_quote "$FEATURE_STATUS"; printf ','
+      printf '"title":'; json_quote "$FEATURE_TITLE"; printf ','
+      printf '"updatedAt":'; json_quote "$FEATURE_UPDATED_AT"
+      printf '}'
+      first=0
+    done <<< "$refs"
+    printf ']\n'
+    return 0
+  fi
+
+  while IFS= read -r ref || [ -n "$ref" ]; do
+    [ -n "$ref" ] || continue
+    feature_id=${ref#$FEATURES_REF_PREFIX/}
+    dir=$(unpack_feature_dir "$feature_id")
+    load_feature_data_dir "$dir"
+    if [ -n "$status_filter" ] && [ "$FEATURE_STATUS" != "$status_filter" ]; then
+      continue
+    fi
+    printf -- '- %s%s\n' "$FEATURE_ID" "$( [ "$FEATURE_ACTIVE" = '1' ] && printf ' [active]' )"
+    printf '  %s\n' "$FEATURE_TITLE"
+    printf '  status=%s updated=%s ready_leaf=%s blocked_leaf=%s\n' \
+      "$FEATURE_STATUS" "$FEATURE_UPDATED_AT" "$FEATURE_COUNT_READY_LEAF" "$FEATURE_COUNT_BLOCKED_LEAF"
+  done <<< "$refs"
+}
+
+command_show_feature() {
+  local feature='' json=0 dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_show_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  feature=$(resolve_feature_id "$feature")
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+
+  if [ "$json" -eq 1 ]; then
+    print_json_feature_view
+    printf '\n'
+  else
+    print_feature_summary 1
+  fi
+}
+
+command_activate_feature() {
+  local feature='' json=0 dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_activate_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$feature" ] || die '--feature is required.'
+  [ -n "$(feature_commit "$feature")" ] || die "Feature does not exist: $feature"
+  set_active_feature "$feature"
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+  FEATURE_ACTIVE='1'
+
+  if [ "$json" -eq 1 ]; then
+    print_json_feature_view
+    printf '\n'
+  else
+    printf 'Activated Ralph feature %s: %s\n' "$FEATURE_ID" "$FEATURE_TITLE"
+  fi
+}
+
+command_deactivate_feature() {
+  if [ $# -gt 0 ]; then
+    case "$1" in
+      -h|--help)
+        usage_deactivate_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  fi
+  clear_active_feature
+  printf 'Cleared the active Ralph feature.\n'
+}
+
+command_current_feature() {
+  local json=0 feature dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_current_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  feature=$(active_feature_id) || die 'No active Ralph feature.'
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+  FEATURE_ACTIVE='1'
+
+  if [ "$json" -eq 1 ]; then
+    print_json_feature_view
+    printf '\n'
+  else
+    print_feature_summary 0
+  fi
+}
+
+NEW_TASK_ID=''
+NEW_TASK_TITLE=''
+
+mutate_add_task() {
+  local dir=$1
+  local next_number task_id task_dir
+
+  next_number=$(read_file "$(feature_field_path "$dir" next-task-number)")
+  [ -n "$next_number" ] || next_number='1'
+  task_id=$(printf 'task-%03d' "$next_number")
+  task_dir=$(task_dir_path "$dir" "$task_id")
+
+  ensure_dir "$task_dir"
+  write_file "$task_dir/title" "$ADD_TASK_TITLE"
+  write_file "$task_dir/description" "$ADD_TASK_DESCRIPTION"
+  write_file "$task_dir/status" 'open'
+  write_file "$task_dir/parent-task-id" "$ADD_TASK_PARENT"
+  write_file "$task_dir/created-at" "$ADD_TASK_TIMESTAMP"
+  write_file "$task_dir/updated-at" "$ADD_TASK_TIMESTAMP"
+  write_file "$task_dir/depends-on" "$ADD_TASK_DEPENDS_ON"
+  write_file "$(feature_field_path "$dir" next-task-number)" "$((next_number + 1))"
+
+  NEW_TASK_ID=$task_id
+  NEW_TASK_TITLE=$ADD_TASK_TITLE
+}
+
+command_add_task() {
+  local feature='' title='' description='' description_file='' description_has_text=0 description_has_file=0 parent_task='' json=0
+  local -a depends_on=()
+  local feature_dir dep task_ids existing_task
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --title)
+        title=${2-}
+        shift 2
+        ;;
+      --description)
+        description=${2-}
+        description_has_text=1
+        shift 2
+        ;;
+      --description-file)
+        description_file=${2-}
+        description_has_file=1
+        shift 2
+        ;;
+      --parent-task)
+        parent_task=${2-}
+        shift 2
+        ;;
+      --depends-on)
+        depends_on+=("${2-}")
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_add_task
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$title" ] || die '--title is required.'
+  feature=$(resolve_feature_id "$feature")
+  resolve_text_input description "$description_has_text" "$description" "$description_has_file" "$description_file" 1
+  description=$TEXT_RESULT
+
+  feature_dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$feature_dir"
+
+  if [ -n "$parent_task" ] && [ -z "${TASK_TITLE["$parent_task"]:-}" ]; then
+    die "Parent task does not exist: $parent_task"
+  fi
+
+  local depends_on_text=''
+  for dep in "${depends_on[@]}"; do
+    [ -n "$dep" ] || continue
+    if [ -z "${TASK_TITLE["$dep"]:-}" ]; then
+      die "Missing dependencies: $dep"
+    fi
+    if ! printf '%s\n' "$depends_on_text" | grep -Fxq "$dep" 2>/dev/null; then
+      depends_on_text=$(append_line "$depends_on_text" "$dep")
+    fi
+  done
+
+  ADD_TASK_TITLE=$title
+  ADD_TASK_DESCRIPTION=$description
+  ADD_TASK_PARENT=$parent_task
+  ADD_TASK_DEPENDS_ON=$depends_on_text
+  ADD_TASK_TIMESTAMP=$(now_iso)
+  update_feature_with_retry "$feature" "ralph: add task to $feature" mutate_add_task
+
+  if [ "$json" -eq 1 ]; then
+    local dir=$UPDATE_FEATURE_DIR
+    load_feature_data_dir "$dir"
+    print_json_task_object "$NEW_TASK_ID"
+    printf '\n'
+  else
+    printf 'Created %s: %s\n' "$NEW_TASK_ID" "$NEW_TASK_TITLE"
+  fi
+}
+
+UPDATED_TASK_ID=''
+mutate_update_task() {
+  local dir=$1
+  local task_dir timestamp
+  task_dir=$(task_dir_path "$dir" "$UPDATE_TASK_ID")
+  [ -d "$task_dir" ] || die "Task does not exist: $UPDATE_TASK_ID"
+  timestamp=$(now_iso)
+
+  if [ "$UPDATE_TASK_STATUS_SET" = '1' ]; then
+    write_file "$task_dir/status" "$UPDATE_TASK_STATUS"
+  fi
+  if [ "$UPDATE_TASK_TITLE_SET" = '1' ]; then
+    write_file "$task_dir/title" "$UPDATE_TASK_TITLE"
+  fi
+  if [ "$UPDATE_TASK_DESCRIPTION_SET" = '1' ]; then
+    write_file "$task_dir/description" "$UPDATE_TASK_DESCRIPTION"
+  fi
+  if [ "$UPDATE_TASK_CLEAR_PARENT" = '1' ]; then
+    write_file "$task_dir/parent-task-id" ''
+  elif [ "$UPDATE_TASK_PARENT_SET" = '1' ]; then
+    write_file "$task_dir/parent-task-id" "$UPDATE_TASK_PARENT"
+  fi
+  if [ "$UPDATE_TASK_REPLACE_DEPENDS" = '1' ]; then
+    write_file "$task_dir/depends-on" "$UPDATE_TASK_DEPENDS_ON"
+  elif [ "$UPDATE_TASK_CLEAR_DEPENDS" = '1' ]; then
+    write_file "$task_dir/depends-on" ''
+  fi
+  write_file "$task_dir/updated-at" "$timestamp"
+}
+
+command_update_task() {
+  local feature='' task='' status='' title='' description='' description_file='' description_has_text=0 description_has_file=0
+  local parent_task='' parent_set=0 clear_parent=0 clear_depends=0 replace_depends=0 json=0
+  local -a replace_depends_on=()
+  local feature_dir dep dedup_depends=''
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --task)
+        task=${2-}
+        shift 2
+        ;;
+      --status)
+        status=${2-}
+        shift 2
+        ;;
+      --title)
+        title=${2-}
+        shift 2
+        ;;
+      --description)
+        description=${2-}
+        description_has_text=1
+        shift 2
+        ;;
+      --description-file)
+        description_file=${2-}
+        description_has_file=1
+        shift 2
+        ;;
+      --parent-task)
+        parent_task=${2-}
+        parent_set=1
+        shift 2
+        ;;
+      --clear-parent-task)
+        clear_parent=1
+        shift
+        ;;
+      --replace-depends-on)
+        replace_depends_on+=("${2-}")
+        replace_depends=1
+        shift 2
+        ;;
+      --clear-depends-on)
+        clear_depends=1
+        shift
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_update_task
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$task" ] || die '--task is required.'
+  if [ -n "$status" ] && [ "$status" != 'open' ] && [ "$status" != 'completed' ]; then
+    die '--status must be open or completed.'
+  fi
+  if [ "$clear_parent" = '1' ] && [ "$parent_set" = '1' ]; then
+    die 'Use either --parent-task or --clear-parent-task, not both.'
+  fi
+  if [ "$replace_depends" = '1' ] && [ "$clear_depends" = '1' ]; then
+    die 'Use either --replace-depends-on or --clear-depends-on, not both.'
+  fi
+
+  feature=$(resolve_feature_id "$feature")
+  feature_dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$feature_dir"
+
+  [ -n "${TASK_TITLE["$task"]:-}" ] || die "Task does not exist: $task"
+  if [ "$parent_set" = '1' ] && [ -z "${TASK_TITLE["$parent_task"]:-}" ]; then
+    die "Parent task does not exist: $parent_task"
+  fi
+
+  if [ "$description_has_text" = '1' ] || [ "$description_has_file" = '1' ]; then
+    resolve_text_input description "$description_has_text" "$description" "$description_has_file" "$description_file" 0
+    description=$TEXT_RESULT
+    description_has_text=1
+  fi
+
+  if [ "$replace_depends" = '1' ]; then
+    for dep in "${replace_depends_on[@]}"; do
+      [ -n "$dep" ] || continue
+      [ -n "${TASK_TITLE["$dep"]:-}" ] || die "Missing dependencies: $dep"
+      if ! printf '%s\n' "$dedup_depends" | grep -Fxq "$dep" 2>/dev/null; then
+        dedup_depends=$(append_line "$dedup_depends" "$dep")
+      fi
+    done
+  fi
+
+  if [ -z "$status" ] && [ -z "$title" ] && [ "$description_has_text" != '1' ] && [ "$parent_set" != '1' ] && [ "$clear_parent" != '1' ] && [ "$replace_depends" != '1' ] && [ "$clear_depends" != '1' ]; then
+    die 'No task changes requested.'
+  fi
+
+  UPDATE_TASK_ID=$task
+  UPDATE_TASK_STATUS_SET=0
+  UPDATE_TASK_STATUS=''
+  UPDATE_TASK_TITLE_SET=0
+  UPDATE_TASK_TITLE=''
+  UPDATE_TASK_DESCRIPTION_SET=0
+  UPDATE_TASK_DESCRIPTION=''
+  UPDATE_TASK_PARENT_SET=0
+  UPDATE_TASK_PARENT=''
+  UPDATE_TASK_CLEAR_PARENT=$clear_parent
+  UPDATE_TASK_REPLACE_DEPENDS=$replace_depends
+  UPDATE_TASK_CLEAR_DEPENDS=$clear_depends
+  UPDATE_TASK_DEPENDS_ON=$dedup_depends
+
+  if [ -n "$status" ]; then
+    UPDATE_TASK_STATUS_SET=1
+    UPDATE_TASK_STATUS=$status
+  fi
+  if [ -n "$title" ]; then
+    UPDATE_TASK_TITLE_SET=1
+    UPDATE_TASK_TITLE=$title
+  fi
+  if [ "$description_has_text" = '1' ]; then
+    UPDATE_TASK_DESCRIPTION_SET=1
+    UPDATE_TASK_DESCRIPTION=$description
+  fi
+  if [ "$parent_set" = '1' ]; then
+    UPDATE_TASK_PARENT_SET=1
+    UPDATE_TASK_PARENT=$parent_task
+  fi
+
+  update_feature_with_retry "$feature" "ralph: update task $task" mutate_update_task
+  if [ "$json" -eq 1 ]; then
+    load_feature_data_dir "$UPDATE_FEATURE_DIR"
+    print_json_task_object "$task"
+    printf '\n'
+  else
+    printf 'Updated %s: %s\n' "$task" "${TASK_TITLE["$task"]:-$title}"
+  fi
+}
+
+command_list_tasks() {
+  local feature='' status='' ready=0 leaf_only=0 under_task='' json=0
+  local dir task_id
+  local -a selected=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --status)
+        status=${2-}
+        shift 2
+        ;;
+      --ready)
+        ready=1
+        shift
+        ;;
+      --leaf-only)
+        leaf_only=1
+        shift
+        ;;
+      --under-task)
+        under_task=${2-}
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_list_tasks
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  if [ -n "$status" ] && [ "$status" != 'open' ] && [ "$status" != 'completed' ]; then
+    die '--status must be open or completed.'
+  fi
+
+  feature=$(resolve_feature_id "$feature")
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+
+  if [ -n "$under_task" ] && [ -z "${TASK_TITLE["$under_task"]:-}" ]; then
+    die "Task does not exist: $under_task"
+  fi
+  if [ -n "$under_task" ]; then
+    collect_descendants "$under_task"
+  fi
+
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ -n "$under_task" ] && [ -z "${DESCENDANT_SET["$task_id"]:-}" ]; then
+      continue
+    fi
+    if [ -n "$status" ] && [ "${TASK_STATUS["$task_id"]}" != "$status" ]; then
+      continue
+    fi
+    if [ "$ready" = '1' ] && [ "${TASK_READY["$task_id"]}" != '1' ]; then
+      continue
+    fi
+    if [ "$leaf_only" = '1' ] && [ "${TASK_IS_LEAF["$task_id"]}" != '1' ]; then
+      continue
+    fi
+    selected+=("$task_id")
+  done
+
+  if [ "$json" = '1' ]; then
+    print_json_task_array "${selected[@]}"
+    printf '\n'
+  else
+    print_task_list_text "${selected[@]}"
+  fi
+}
+
+command_status() {
+  local feature='' json=0 dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_status
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  feature=$(resolve_feature_id "$feature")
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+
+  if [ "$json" = '1' ]; then
+    print_json_feature_view
+    printf '\n'
+  else
+    print_feature_summary 0
+  fi
+}
+
+mutate_append_progress() {
+  local dir=$1
+  local key progress_dir
+  key="$(entry_stamp)-$(random_hex)"
+  progress_dir="$dir/progress/$key"
+  ensure_dir "$progress_dir"
+  write_file "$progress_dir/timestamp" "$APPEND_PROGRESS_TIMESTAMP"
+  write_file "$progress_dir/task-id" "$APPEND_PROGRESS_TASK_ID"
+  write_file "$progress_dir/title" "$APPEND_PROGRESS_TITLE"
+  write_file "$progress_dir/thread-url" "$APPEND_PROGRESS_THREAD_URL"
+  write_file "$progress_dir/body" "$APPEND_PROGRESS_BODY"
+  APPEND_PROGRESS_KEY=$key
+}
+
+command_append_progress() {
+  local feature='' task='' title='' thread_url='' body='' body_file='' body_has_text=0 body_has_file=0 json=0 dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --task)
+        task=${2-}
+        shift 2
+        ;;
+      --title)
+        title=${2-}
+        shift 2
+        ;;
+      --thread-url)
+        thread_url=${2-}
+        shift 2
+        ;;
+      --body)
+        body=${2-}
+        body_has_text=1
+        shift 2
+        ;;
+      --body-file)
+        body_file=${2-}
+        body_has_file=1
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_append_progress
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  [ -n "$title" ] || die '--title is required.'
+  feature=$(resolve_feature_id "$feature")
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+  if [ -n "$task" ] && [ -z "${TASK_TITLE["$task"]:-}" ]; then
+    die "Task does not exist: $task"
+  fi
+
+  resolve_text_input body "$body_has_text" "$body" "$body_has_file" "$body_file" 1
+  body=$TEXT_RESULT
+
+  APPEND_PROGRESS_TASK_ID=$task
+  APPEND_PROGRESS_TITLE=$title
+  APPEND_PROGRESS_THREAD_URL=$thread_url
+  APPEND_PROGRESS_BODY=$body
+  APPEND_PROGRESS_TIMESTAMP=$(now_iso)
+  APPEND_PROGRESS_KEY=''
+
+  update_feature_with_retry "$feature" "ralph: append progress to $feature" mutate_append_progress
+  load_feature_data_dir "$UPDATE_FEATURE_DIR"
+
+  if [ "$json" = '1' ]; then
+    print_json_progress_object "$APPEND_PROGRESS_KEY"
+    printf '\n'
+  else
+    printf 'Appended progress entry for %s: %s\n' "${task:-feature}" "$title"
+  fi
+}
+
+mutate_add_pattern() {
+  local dir=$1
+  local key pattern_file existing_key
+  for existing_key in $(list_pattern_keys_in_dir "$dir"); do
+    if [ "$(read_file "$dir/patterns/$existing_key")" = "$ADD_PATTERN_TEXT" ]; then
+      ADD_PATTERN_KEY=$existing_key
+      return 0
+    fi
+  done
+  key="$(entry_stamp)-$(random_hex).txt"
+  pattern_file="$dir/patterns/$key"
+  write_file "$pattern_file" "$ADD_PATTERN_TEXT"
+  ADD_PATTERN_KEY=$key
+}
+
+command_add_pattern() {
+  local feature='' text='' text_file='' text_has_text=0 text_has_file=0 json=0 dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --text)
+        text=${2-}
+        text_has_text=1
+        shift 2
+        ;;
+      --text-file)
+        text_file=${2-}
+        text_has_file=1
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_add_pattern
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  feature=$(resolve_feature_id "$feature")
+  resolve_text_input text "$text_has_text" "$text" "$text_has_file" "$text_file" 1
+  text=$TEXT_RESULT
+
+  ADD_PATTERN_TEXT=$text
+  ADD_PATTERN_KEY=''
+  update_feature_with_retry "$feature" "ralph: add pattern to $feature" mutate_add_pattern
+  load_feature_data_dir "$UPDATE_FEATURE_DIR"
+
+  if [ "$json" = '1' ]; then
+    print_json_pattern_array
+    printf '\n'
+  else
+    printf 'Stored Ralph codebase pattern.\n'
+  fi
+}
+
+command_validate_feature() {
+  local feature='' json=0 dir record message
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_validate_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  feature=$(resolve_feature_id "$feature")
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+  validate_loaded_feature
+
+  if [ "$json" = '1' ]; then
+    print_json_validation_issues
+    printf '\n'
+  elif [ ${#VALIDATION_ISSUES[@]} -eq 0 ]; then
+    printf 'Feature is valid.\n'
+  else
+    printf 'Feature is invalid:\n'
+    for record in "${VALIDATION_ISSUES[@]}"; do
+      message=${record#*$'\t'*$'\t'}
+      printf -- '- %s\n' "$message"
+    done
+  fi
+
+  if [ ${#VALIDATION_ISSUES[@]} -eq 0 ]; then
+    return 0
+  fi
+  return 2
+}
+
+mutate_complete_feature() {
+  local dir=$1 task_id open_leaf=()
+  load_feature_data_dir "$dir"
+
+  for task_id in "${TASK_IDS[@]}"; do
+    if [ "${TASK_IS_LEAF["$task_id"]}" = '1' ] && [ "${TASK_STATUS["$task_id"]}" = 'open' ]; then
+      open_leaf+=("$task_id")
+    fi
+  done
+
+  if [ ${#open_leaf[@]} -gt 0 ] && [ "$COMPLETE_FEATURE_FORCE" != '1' ]; then
+    die "Cannot complete feature; open leaf tasks remain: $(join_by ', ' "${open_leaf[@]}"). Use --force to override."
+  fi
+
+  local timestamp
+  timestamp=$(now_iso)
+  for task_id in "${TASK_IDS[@]}"; do
+    write_file "$(task_field_path "$dir" "$task_id" status)" 'completed'
+    write_file "$(task_field_path "$dir" "$task_id" updated-at)" "$timestamp"
+  done
+  write_file "$(feature_field_path "$dir" status)" 'completed'
+}
+
+command_complete_feature() {
+  local feature='' force=0 json=0 dir
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature=${2-}
+        shift 2
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      -h|--help)
+        usage_complete_feature
+        return 0
+        ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  feature=$(resolve_feature_id "$feature")
+  COMPLETE_FEATURE_FORCE=$force
+  update_feature_with_retry "$feature" "ralph: complete feature $feature" mutate_complete_feature
+
+  if [ "$(active_feature_id 2>/dev/null || true)" = "$feature" ]; then
+    clear_active_feature
+  fi
+
+  dir=$(unpack_feature_dir "$feature")
+  load_feature_data_dir "$dir"
+  FEATURE_ACTIVE='0'
+
+  if [ "$json" = '1' ]; then
+    print_json_feature_view
+    printf '\n'
+  else
+    printf 'Completed Ralph feature %s: %s\n' "$FEATURE_ID" "$FEATURE_TITLE"
+  fi
+}
+
+main() {
+  local command=${1:-}
+  if [ -z "$command" ]; then
+    usage
+    return 0
+  fi
+  shift || true
+
+  case "$command" in
+    -h|--help)
+      usage
+      ;;
+    init-feature)
+      command_init_feature "$@"
+      ;;
+    list-features)
+      command_list_features "$@"
+      ;;
+    show-feature)
+      command_show_feature "$@"
+      ;;
+    activate-feature)
+      command_activate_feature "$@"
+      ;;
+    deactivate-feature)
+      command_deactivate_feature "$@"
+      ;;
+    current-feature)
+      command_current_feature "$@"
+      ;;
+    add-task)
+      command_add_task "$@"
+      ;;
+    update-task)
+      command_update_task "$@"
+      ;;
+    list-tasks)
+      command_list_tasks "$@"
+      ;;
+    status)
+      command_status "$@"
+      ;;
+    append-progress)
+      command_append_progress "$@"
+      ;;
+    add-pattern)
+      command_add_pattern "$@"
+      ;;
+    validate-feature)
+      command_validate_feature "$@"
+      ;;
+    complete-feature)
+      command_complete_feature "$@"
+      ;;
+    *)
+      die "Unknown command: $command"
+      ;;
+  esac
+}
+
+require_git_repo
+main "$@"
