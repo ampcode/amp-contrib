@@ -1,0 +1,29 @@
+{
+  "name": "suno-by-acedatacloud",
+  "display_name": "Suno by Ace Data Cloud",
+  "version": "1.0.0",
+  "category": "music",
+  "keywords": [
+    "Suno",
+    "suno",
+    "music",
+    "Amp",
+    "Ace Data Cloud"
+  ],
+  "source_repository": "https://github.com/AceDataCloud/SunoMCP",
+  "mcp_package": "mcp-suno",
+  "auth_env": "ACEDATACLOUD_API_TOKEN",
+  "tool_names": [
+    "suno_list_models",
+    "suno_generate_music",
+    "suno_generate_custom_music",
+    "suno_get_task"
+  ],
+  "generation_tool": "suno_generate_music",
+  "poll_tool": "suno_get_task",
+  "poll_argument": "task_id",
+  "read_only_tool": "suno_list_models",
+  "license": "Apache-2.0",
+  "listing_status": "proposed; not accepted or published",
+  "official_submission_target": "https://github.com/ampcode/amp-contrib"
+}

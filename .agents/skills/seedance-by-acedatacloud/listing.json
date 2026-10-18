@@ -1,0 +1,30 @@
+{
+  "name": "seedance-by-acedatacloud",
+  "display_name": "Seedance by Ace Data Cloud",
+  "version": "1.0.0",
+  "category": "video",
+  "keywords": [
+    "Seedance",
+    "seedance",
+    "video",
+    "Amp",
+    "Ace Data Cloud"
+  ],
+  "source_repository": "https://github.com/AceDataCloud/SeedanceMCP",
+  "mcp_package": "mcp-seedance",
+  "auth_env": "ACEDATACLOUD_API_TOKEN",
+  "tool_names": [
+    "seedance_list_models",
+    "seedance_list_resolutions",
+    "seedance_generate_video",
+    "seedance_generate_video_from_image",
+    "seedance_get_task"
+  ],
+  "generation_tool": "seedance_generate_video",
+  "poll_tool": "seedance_get_task",
+  "poll_argument": "task_id",
+  "read_only_tool": "seedance_list_models",
+  "license": "Apache-2.0",
+  "listing_status": "proposed; not accepted or published",
+  "official_submission_target": "https://github.com/ampcode/amp-contrib"
+}

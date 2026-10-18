@@ -1,0 +1,28 @@
+{
+  "name": "nano-banana-by-acedatacloud",
+  "display_name": "Nano Banana by Ace Data Cloud",
+  "version": "1.0.0",
+  "category": "image",
+  "keywords": [
+    "Nano Banana",
+    "nano-banana",
+    "image",
+    "Amp",
+    "Ace Data Cloud"
+  ],
+  "source_repository": "https://github.com/AceDataCloud/NanoBananaMCP",
+  "mcp_package": "mcp-nanobanana-pro",
+  "auth_env": "ACEDATACLOUD_API_TOKEN",
+  "tool_names": [
+    "nanobanana_generate_image",
+    "nanobanana_edit_image",
+    "nanobanana_get_task"
+  ],
+  "generation_tool": "nanobanana_generate_image",
+  "poll_tool": "nanobanana_get_task",
+  "poll_argument": "task_id",
+  "read_only_tool": null,
+  "license": "Apache-2.0",
+  "listing_status": "proposed; not accepted or published",
+  "official_submission_target": "https://github.com/ampcode/amp-contrib"
+}

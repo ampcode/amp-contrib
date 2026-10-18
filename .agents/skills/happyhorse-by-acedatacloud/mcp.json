@@ -1,0 +1,16 @@
+{
+  "happyhorse-ace": {
+    "url": "https://happyhorse.mcp.acedata.cloud/mcp",
+    "headers": {
+      "Authorization": "Bearer ${ACEDATACLOUD_API_TOKEN}"
+    },
+    "includeTools": [
+      "happyhorse_list_models",
+      "happyhorse_generate_video",
+      "happyhorse_generate_video_from_image",
+      "happyhorse_generate_video_from_references",
+      "happyhorse_edit_video",
+      "happyhorse_get_task"
+    ]
+  }
+}
