@@ -12,9 +12,9 @@ Amp's [official Skill mechanism](https://ampcode.com/docs/customize/skills) inst
 amp skill add AceDataCloud/Skills/platforms/amp/skills/nano-banana-by-acedatacloud
 ```
 
-This source command becomes available after the source PR merges. The proposed official [amp-contrib directory](https://github.com/ampcode/amp-contrib) entry is pending review; **do not treat this source install as an accepted official listing**. If accepted, its independent command is `amp skill add ampcode/amp-contrib/nano-banana-by-acedatacloud`. Do not install both copies.
+The source command above is published from [Ace Skills main](https://github.com/AceDataCloud/Skills/commit/6169154675fd6523ad4230c257c7f70227a7c41b) (2026-10-19). Signed-in Amp installation is still awaiting verification. The proposed official [amp-contrib directory](https://github.com/ampcode/amp-contrib) entry is pending review; **do not treat this source install as an accepted official listing**. If accepted, its independent command is `amp skill add ampcode/amp-contrib/nano-banana-by-acedatacloud`. Do not install both copies.
 
-For a reviewed local checkout before merge: `amp skill add ./platforms/amp/skills/nano-banana-by-acedatacloud --target /absolute/path/to/project/.agents/skills`. Amp currently requires an account even for this installer. A local copy/format check is not a signed-in Amp execution test.
+For a reviewed local checkout: `amp skill add ./platforms/amp/skills/nano-banana-by-acedatacloud --target /absolute/path/to/project/.agents/skills`. Amp currently requires an account even for this installer. A local copy/format check is not a signed-in Amp execution test.
 
 ## 2. Register/sign in to Ace and get your own key
 

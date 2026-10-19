@@ -10,7 +10,7 @@
 amp skill add AceDataCloud/Skills/platforms/amp/skills/suno-by-acedatacloud
 ```
 
-该源码命令需源 PR 合并后使用；[官方 amp-contrib](https://github.com/ampcode/amp-contrib) 投稿仍待审，不能称已收录。获接纳后独立安装命令为 `amp skill add ampcode/amp-contrib/suno-by-acedatacloud`；不要两份同时安装。审查本地分支可用 `amp skill add ./platforms/amp/skills/suno-by-acedatacloud --target /绝对路径/项目/.agents/skills`，当前安装器也要求 Amp 登录。
+该源码命令已随 [Ace Skills main](https://github.com/AceDataCloud/Skills/commit/6169154675fd6523ad4230c257c7f70227a7c41b) 于2026-10-19发布；登录Amp后的实际安装仍待验证。[官方 amp-contrib](https://github.com/ampcode/amp-contrib) 投稿仍待审，不能称已收录。获接纳后独立安装命令为 `amp skill add ampcode/amp-contrib/suno-by-acedatacloud`；不要两份同时安装。审查本地checkout可用 `amp skill add ./platforms/amp/skills/suno-by-acedatacloud --target /绝对路径/项目/.agents/skills`，当前安装器也要求 Amp 登录。
 
 ## 2. 获取专用 API Token
 
