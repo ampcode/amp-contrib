@@ -1,0 +1,29 @@
+{
+  "name": "gpt-image-by-acedatacloud",
+  "display_name": "GPT Image by Ace Data Cloud",
+  "version": "1.0.0",
+  "category": "image",
+  "keywords": [
+    "GPT Image",
+    "gpt-image",
+    "image",
+    "Amp",
+    "Ace Data Cloud"
+  ],
+  "source_repository": "https://github.com/AceDataCloud/OpenAIMCP",
+  "mcp_package": "mcp-openai-pro",
+  "auth_env": "ACEDATACLOUD_API_TOKEN",
+  "tool_names": [
+    "openai_list_image_models",
+    "openai_generate_image",
+    "openai_edit_image",
+    "openai_get_task"
+  ],
+  "generation_tool": "openai_generate_image",
+  "poll_tool": "openai_get_task",
+  "poll_argument": "id",
+  "read_only_tool": "openai_list_image_models",
+  "license": "Apache-2.0",
+  "listing_status": "source published on 2026-10-19; official directory pending review",
+  "official_submission_target": "https://github.com/ampcode/amp-contrib"
+}

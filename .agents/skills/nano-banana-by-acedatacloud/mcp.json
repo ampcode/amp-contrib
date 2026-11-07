@@ -1,0 +1,13 @@
+{
+  "nano-banana-ace": {
+    "url": "https://nanobanana.mcp.acedata.cloud/mcp",
+    "headers": {
+      "Authorization": "Bearer ${ACEDATACLOUD_API_TOKEN}"
+    },
+    "includeTools": [
+      "nanobanana_generate_image",
+      "nanobanana_edit_image",
+      "nanobanana_get_task"
+    ]
+  }
+}

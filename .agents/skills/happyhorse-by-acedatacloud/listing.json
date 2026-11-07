@@ -1,0 +1,31 @@
+{
+  "name": "happyhorse-by-acedatacloud",
+  "display_name": "HappyHorse by Ace Data Cloud",
+  "version": "1.0.0",
+  "category": "video",
+  "keywords": [
+    "HappyHorse",
+    "happyhorse",
+    "video",
+    "Amp",
+    "Ace Data Cloud"
+  ],
+  "source_repository": "https://github.com/AceDataCloud/HappyHorseMCP",
+  "mcp_package": "mcp-happyhorse",
+  "auth_env": "ACEDATACLOUD_API_TOKEN",
+  "tool_names": [
+    "happyhorse_list_models",
+    "happyhorse_generate_video",
+    "happyhorse_generate_video_from_image",
+    "happyhorse_generate_video_from_references",
+    "happyhorse_edit_video",
+    "happyhorse_get_task"
+  ],
+  "generation_tool": "happyhorse_generate_video",
+  "poll_tool": "happyhorse_get_task",
+  "poll_argument": "task_id",
+  "read_only_tool": "happyhorse_list_models",
+  "license": "Apache-2.0",
+  "listing_status": "source published on 2026-10-19; official directory pending review",
+  "official_submission_target": "https://github.com/ampcode/amp-contrib"
+}

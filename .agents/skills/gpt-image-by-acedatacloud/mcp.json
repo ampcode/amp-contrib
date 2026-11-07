@@ -1,0 +1,14 @@
+{
+  "gpt-image-ace": {
+    "url": "https://openai.mcp.acedata.cloud/mcp",
+    "headers": {
+      "Authorization": "Bearer ${ACEDATACLOUD_API_TOKEN}"
+    },
+    "includeTools": [
+      "openai_list_image_models",
+      "openai_generate_image",
+      "openai_edit_image",
+      "openai_get_task"
+    ]
+  }
+}

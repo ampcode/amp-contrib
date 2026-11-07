@@ -1,0 +1,14 @@
+{
+  "suno-ace": {
+    "url": "https://suno.mcp.acedata.cloud/mcp",
+    "headers": {
+      "Authorization": "Bearer ${ACEDATACLOUD_API_TOKEN}"
+    },
+    "includeTools": [
+      "suno_list_models",
+      "suno_generate_music",
+      "suno_generate_custom_music",
+      "suno_get_task"
+    ]
+  }
+}
