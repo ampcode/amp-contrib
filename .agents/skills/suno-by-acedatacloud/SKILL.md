@@ -31,4 +31,10 @@ Load this Skill to expose its MCP tools. Use `suno_list_models` once to inspect 
 4. Require an explicit terminal success (`state=complete` with success, or the returned finished timestamp and successful response). Failure is terminal too. A pending task or an early media URL is not completion. Do not invent IDs, output links, media availability, completion or billing. Report the final status and returned media links; preserve upstream errors (including rate limit and moderation meaning).
 5. On an uncertain submission, inspect its original task/request before any new paid request. A failed result is not permission to retry, change the model, or use a fallback.
 
+## Custom inputs and processing failures
+
+When the connected tool supports `negative_tags`, use it for generation with `custom: true` or for `replace_section`. The audio endpoint currently enforces no fixed character limit for this field; keep it concise because overly long input may still fail.
+
+A downloadable audio file does not guarantee its `audio_id` remains usable for covers, extension or stem separation. Preserve the public HTTP 500 codes `suno_processing_unavailable` (processing unavailable), `suno_model_unavailable` (selected model unavailable for this operation), and `suno_processing_failed` (processing returned no audio). Also preserve HTTP 500 `api_error` with the message `the account may have been offline` when returned by `/suno/audios`. Retain `task_id` and `trace_id` when returned and contact support with those IDs, never the API key. Query the existing task if submission is uncertain; do not automatically retry a paid operation or silently switch models.
+
 Amp reasoning can have its own usage charge. Installation/tool discovery and API metadata are distinct from inference, generation, terminal media, and the account's usage record.
